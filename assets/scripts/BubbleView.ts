@@ -1,10 +1,33 @@
 import { BubbleData } from "./BubbleData";
 import Bubble from "./Bubble";
+import Combo from "./Combo";
+import ReadyGo from "./ReadyGo";
+import GameResult from "./GameResult";
 
 const {ccclass, property} = cc._decorator;
 
 @ccclass
 export default class BubbleMgr extends cc.Component {
+
+    /** 游戏总得分 */
+    @property(cc.Label) 
+    gameScore: cc.Label = null;
+
+    /** 游戏时间 */
+    @property(cc.Label) 
+    gameTime: cc.Label = null;
+
+    /** 游戏结果 */
+    @property(GameResult) 
+    gameResult: GameResult = null;
+
+    /** combo提示 */
+    @property(Combo) 
+    combo: Combo = null;
+
+    /** readyGo提示 */
+    @property(ReadyGo) 
+    readyGo: ReadyGo = null;
 
     /** 泡泡纹理 */
     @property([cc.SpriteFrame]) 
@@ -35,8 +58,14 @@ export default class BubbleMgr extends cc.Component {
     radius: number = 28;
 
     private rowOffsetY: number = this.radius * Math.sqrt(3); 
+    private isPlaying: Boolean = false;
+    private generatingRow: Boolean = false;
+    private currentStatus: number = 0; // 0.空闲 1.碰撞检测 2.消除检测 3.下落检测 4.生成新行
     private currentHeight: number = 0;
     private currentLevel: number = 1;
+    private currentScore: number = 0;
+    private currentGameTime: number = 0;
+    private shotCount: number = 0;
     private shooterList: Array<number> = [];
 
     /** 装载场景中所有泡泡，注意 s 这是二维数组 */
@@ -53,8 +82,9 @@ export default class BubbleMgr extends cc.Component {
         this.rowOffsetY = this.radius * Math.sqrt(3); 
         this.shooter.opacity = 0;
         this.initLevel(this.currentLevel);
-        this.createOneShooter();
         this.openTouch();
+
+        this.startGame();
     }
 
     update (dt: number) {
@@ -63,10 +93,33 @@ export default class BubbleMgr extends cc.Component {
             this.resetSize();
         }
 
+        this.updateTime(dt);
+
         if (this.isShooting) {
             // 小球移动
             this.bubbleMove(dt);
             this._isCollided();
+        }
+    }
+
+    updateTime(dt) {
+        if(!this.isPlaying) {
+            this.gameTime.string = this.levelData.json[this.currentLevel].time;
+            return;
+        }
+
+        this.currentGameTime += dt;
+        if(this.levelData.json[this.currentLevel].time) {
+            if(this.currentGameTime < this.levelData.json[this.currentLevel].time) {
+                this.gameTime.string = (Math.trunc(this.levelData.json[this.currentLevel].time - this.currentGameTime)).toString();
+            }
+            else {
+                this.gameTime.string = "0";
+                this.isPlaying = false;
+                this.gameResult.show(this.currentScore, 0, () => {
+                    this.startGame();
+                });
+            }
         }
     }
 
@@ -76,6 +129,7 @@ export default class BubbleMgr extends cc.Component {
 
     /** 检测碰撞 */
     private _isCollided (): void {
+        this.currentStatus = 1;
         for (let row = 0; row < this.bubblesArray.length; row++) {
             for (let col = 0; col < this.bubblesArray[row].length; col++) {
                 // 是否存在小球
@@ -124,6 +178,7 @@ export default class BubbleMgr extends cc.Component {
 
     /** 相同颜色检测，传入当前小球位置 */
     private _mapColor (index: cc.Vec2): void {
+        this.currentStatus = 2;
         // 检测消除方法
         let test: Function = (row: number, col: number, color: number) => {
             // 非空检测
@@ -169,19 +224,28 @@ export default class BubbleMgr extends cc.Component {
                     this.bubblesArray[row][col].isVisited = false;
                     count ++;
                     // 记录要进行消除的泡泡行列值
-                    record.push(cc.v2(row, col));
+                    record.unshift(cc.v2(row, col));
                 }
             }
         }
+        
         if (count >= 3) {
+            let cellScore = this.levelData.json[this.currentLevel].cellScore;
             // 执行消除
-            for (let i in record) {
+            record.forEach((element, index) => {
+                let score = 0;
+                if(index > 2) {
+                    score += (index - 1) * cellScore;
+                }
+                else {
+                    score += cellScore;
+                }
                 // 获取到该位置泡泡，执行消除
-                let b = this.bubblesArray[record[i].x][record[i].y].node;
-                b.getComponent(Bubble).playDeathAnimation(record[i], this.removeBubble.bind(this));
-            }
-            this.scheduleOnce(this._testUnLinked, 0.3);
-            // this.scheduleOnce(this._nextBubble, 0.3);
+                let b = this.bubblesArray[element.x][element.y].node;
+                b.getComponent(Bubble).playDeathAnimation(element, score, this.removeBubble.bind(this));
+                this.currentScore += score;
+            });
+            this.scheduleOnce(this._testUnLinked, 0.5);
         } else {
            this._nextBubble();
         }
@@ -189,6 +253,7 @@ export default class BubbleMgr extends cc.Component {
 
     /** 悬空检测 同理 */
     private _testUnLinked (): void {
+        this.currentStatus = 3;
         // 检测方法
         let test: Function = (row: number, col: number) => {
             //从刚刚加入的泡泡为起点,递归寻找相连的
@@ -223,13 +288,13 @@ export default class BubbleMgr extends cc.Component {
             test(0, i);
         }
 
-        // 局部标志，是否执行过下落
-        let flag: boolean = true;
+        // 执行下落动画
+        let comboCount = 0;
         for (let row = 0; row < this.bubblesArray.length; row++) {
             for (let col = 0; col < this.bubblesArray[row].length; col++) {
                 if (!this.bubblesArray[row][col]) continue;
                 if (!this.bubblesArray[row][col].isLinked) {
-                    flag = false;
+                    comboCount ++;
                     let b = this.bubblesArray[row][col].node;
                     b.getComponent(Bubble).playDownAnimation(cc.v2(row, col), this.removeBubble.bind(this));
                 } else {
@@ -238,16 +303,26 @@ export default class BubbleMgr extends cc.Component {
                 }
             }
         }
-        if (flag) {
+        if (comboCount <= 0) {
+            if(this.generatingRow) return;
             this._nextBubble();
         } else {
+            this.currentScore += (comboCount * this.levelData.json[this.currentLevel].comboScore);
+            this.combo.playAnimation(comboCount);
+
+            if(this.generatingRow) return;
             this.scheduleOnce(this._nextBubble, 0.6);
         }
     }
 
     private _nextBubble (): void {
-        // 继续游戏
-        this.createOneShooter();
+        this.addBubbleRow(()=>{
+            // 继续游戏
+            this.createOneShooter();
+            //
+            this.gameScore.string = this.currentScore.toString();
+            this.currentStatus = 0;
+        });
     }
 
     /** 创造发射小球 */
@@ -279,6 +354,7 @@ export default class BubbleMgr extends cc.Component {
         let result = this.shooterList.shift();
 
         this.presetBalls.children.forEach((item, index) => {
+            // if(index > 0) return;
             let color = this.shooterList[index];
             item.getComponent(cc.Sprite).spriteFrame = this.bubbleSpriteFrame[color - 1];
         });
@@ -328,12 +404,63 @@ export default class BubbleMgr extends cc.Component {
         this.bubblesArray[point.x][point.y] = undefined;
     }
 
+    private addBubbleRow(finishCallback: Function) {
+        this.currentStatus = 4;
+        if(!this.generatingRow && (this.shotCount % this.levelData.json[this.currentLevel].addRowUnit) == 0) {
+            let row = [];
+            let count = this.levelData.json[this.currentLevel].rowCount;
+            this.generatingRow = true;
+            for(let i = 0; i < count; i++) {
+                // 实例化泡泡
+                let b = cc.instantiate(this.bubblePrefab);
+                // 行列 -> 坐标
+                let pos = this.convertRowColToPos(0, i);
+                let color = this.randNum(1, 5);
+                // 调用泡泡初始化
+                b.getComponent(Bubble).init(this.node, new cc.Vec2(pos.x, pos.y + this.radius * 2), this.bubbleSpriteFrame[color-1]);
+                // 往bubblesArray 里 设置对应数据
+                let obj: BubbleData = Object.create(null);
+                obj.node = b;
+                obj.color = color;
+                obj.isLinked = false;
+                obj.isVisited = false;
+                row.push(obj);
+            }
+            this.bubblesArray.unshift(row);
+    
+            this.resetSize();
+
+            this._testUnLinked();
+            this.generatingRow = false;
+        }
+
+        if(finishCallback) {
+            finishCallback();
+        }
+    }
+
     private resetSize() {
         this.bubblesArray.forEach((rowData, rowIndex) => {
             rowData.forEach((colData, colIndex) => {
-                colData.node.position = this.convertRowColToPos(rowIndex, colIndex);
+                if(colData && colData.node) {
+                    colData.node.runAction(cc.moveTo(0.25, this.convertRowColToPos(rowIndex, colIndex)));
+                }
             });
         });
+    }
+
+    private startGame() {
+        this.readyGo.playCountdown(() => {
+            this.currentGameTime = 0;
+            this.isPlaying = true;
+            this.createOneShooter();
+        });
+    }
+
+    private shot() {
+        if(!this.isPlaying || this.isShooting || this.currentStatus != 0) return;
+        this.isShooting = true;
+        this.shotCount++;
     }
 
     public openTouch (): void {
@@ -370,7 +497,7 @@ export default class BubbleMgr extends cc.Component {
         // 分量 x - sin  y - cos
         this.shootDir = cc.v2(-Math.sin(r), Math.cos(r));
         // 开启射击
-        this.isShooting = true;
+        this.shot();
     }
 
     // 转化角度
